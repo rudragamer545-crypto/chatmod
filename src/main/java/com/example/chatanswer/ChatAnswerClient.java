@@ -36,14 +36,21 @@ public class ChatAnswerClient implements ClientModInitializer {
     private static final java.util.Map<String, String> RECENT = new java.util.concurrent.ConcurrentHashMap<>();
     private static volatile String lastQuestion = null;
 
+    // Guess-the-number game: numbers other players already tried (they were wrong)
+    private static final java.util.Set<Integer> GUESSED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static volatile long guessUntil = 0;
+
     private static final Pattern MATH_LINE = Pattern.compile("^[0-9+\\-*/xX×÷().\\s−–—✕·]+$");
 
     @Override
     public void onInitializeClient() {
         loadSettings();
+        loadCf();
         registerCommands();
+        registerCfCommands();
         ClientReceiveMessageEvents.CHAT.register((msg, signed, sender, params, ts) -> record(msg.getString()));
         ClientReceiveMessageEvents.GAME.register((msg, overlay) -> {
+            try { trackCoinflip(msg.getString()); } catch (Exception ignored) { }
             if (!overlay) handle(msg);
         });
     }
@@ -62,6 +69,11 @@ public class ChatAnswerClient implements ClientModInitializer {
             else if (lower.contains("unscramble")) arm("unscramble");
             else if (lower.contains("first to type")) arm("type", 4_000);
             else if (lower.contains("reverse")) arm("reverse", 4_000);
+            else if (lower.contains("first to guess")) {
+                GUESSED.clear();
+                guessUntil = System.currentTimeMillis() + 20_000;
+                arm("guess", 4_000);
+            }
             else if (lower.contains("first to answer") || lower.contains("the question")) arm("trivia", 6_000);
         }
         if (System.currentTimeMillis() > armedUntil) return;
@@ -88,6 +100,10 @@ public class ChatAnswerClient implements ClientModInitializer {
                     String l = line.replaceFirst("^[^A-Za-z]+", "").trim();
                     if (!l.isEmpty() && l.matches("[A-Za-z ]+")) answer = solveUnscramble(l);
                 }
+                case "guess" -> {
+                    java.util.regex.Matcher mg = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*(\\d+)\\s*[-–—]\\s*(\\d+)$").matcher(line.trim());
+                    if (mg.matches()) answer = "GUESS:" + mg.group(1) + ":" + mg.group(2);
+                }
                 case "reverse" -> {
                     java.util.regex.Matcher mr = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*([A-Za-z0-9]+)$").matcher(line.trim());
                     if (mr.matches()) answer = new StringBuilder(mr.group(1)).reverse().toString();
@@ -112,7 +128,7 @@ public class ChatAnswerClient implements ClientModInitializer {
                 final String a = answer;
                 armedUntil = 0;
                 long delay = getDelayMs();
-                SCHEDULER.schedule(() -> send(a), delay, TimeUnit.MILLISECONDS);
+                SCHEDULER.schedule(() -> send(resolve(a)), delay, TimeUnit.MILLISECONDS);
                 return;
             }
         }
@@ -192,6 +208,18 @@ public class ChatAnswerClient implements ClientModInitializer {
                                 DoubleArgumentType.getDouble(ctx, "min"),
                                 DoubleArgumentType.getDouble(ctx, "max")))))))
         );
+    }
+
+    /** Turns a "GUESS:min:max" placeholder into a number not yet tried by other players. */
+    private static String resolve(String a) {
+        if (!a.startsWith("GUESS:")) return a;
+        String[] p = a.split(":");
+        int min = Integer.parseInt(p[1]), max = Integer.parseInt(p[2]);
+        if (max < min) { int t = min; min = max; max = t; }
+        List<Integer> open = new ArrayList<>();
+        for (int i = min; i <= max; i++) if (!GUESSED.contains(i)) open.add(i);
+        if (open.isEmpty()) return String.valueOf(min + ThreadLocalRandom.current().nextInt(max - min + 1));
+        return String.valueOf(open.get(ThreadLocalRandom.current().nextInt(open.size())));
     }
 
     private void arm(String type) { arm(type, 10_000); }
@@ -295,6 +323,126 @@ public class ChatAnswerClient implements ClientModInitializer {
         return new String(c);
     }
 
+    // ---------- COINFLIP TRACKER ----------
+    private static final List<Boolean> CF = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private static volatile long cfActiveUntil = 0;
+    private static volatile String cfResult = null, cfWinner = null, cfLoser = null;
+
+    private static Path cfFile() {
+        return FabricLoader.getInstance().getConfigDir().resolve("coinflip-log.csv");
+    }
+
+    private static void loadCf() {
+        try {
+            Path f = cfFile();
+            if (!Files.exists(f)) return;
+            for (String line : Files.readAllLines(f)) {
+                String[] p = line.split(",");
+                if (p.length >= 2 && (p[1].equals("W") || p[1].equals("L"))) CF.add(p[1].equals("W"));
+            }
+        } catch (Exception ignored) { }
+    }
+
+    /** Reads the "Coinflip Summary" chat message the server prints after each flip. */
+    private static void trackCoinflip(String text) {
+        String lower = text.toLowerCase();
+        if (lower.contains("coinflip summary")) {
+            cfActiveUntil = System.currentTimeMillis() + 6_000;
+            cfResult = null; cfWinner = null; cfLoser = null;
+        }
+        if (System.currentTimeMillis() > cfActiveUntil) return;
+
+        for (String line : text.split("\\R")) {
+            String l = line.trim();
+            String ll = l.toLowerCase();
+            if (ll.contains("you won the coinflip")) cfResult = "W";
+            else if (ll.contains("you lost the coinflip")) cfResult = "L";
+            int c = l.indexOf(':');
+            if (c < 0) continue;
+            String key = ll.substring(0, c).trim();
+            String val = l.substring(c + 1).trim();
+            if (key.endsWith("winner")) cfWinner = val;
+            else if (key.endsWith("loser")) cfLoser = val;
+            else if (key.endsWith("amount")) { finishCf(val); return; }
+        }
+    }
+
+    private static void finishCf(String amount) {
+        String me = Minecraft.getInstance().getUser().getName();
+        String res = cfResult;
+        if (res == null) {
+            if (me.equalsIgnoreCase(cfWinner)) res = "W";
+            else if (me.equalsIgnoreCase(cfLoser)) res = "L";
+        }
+        cfActiveUntil = 0;
+        if (res == null) return;
+        String opp = res.equals("W") ? cfLoser : cfWinner;
+        CF.add(res.equals("W"));
+        try {
+            String now = java.time.LocalDateTime.now()
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            Files.writeString(cfFile(), now + "," + res + "," + amount + "," + opp + "\n",
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception ignored) { }
+    }
+
+    private static List<String> cfStats() {
+        List<Boolean> r = new ArrayList<>(CF);
+        List<String> out = new ArrayList<>();
+        int n = r.size();
+        if (n == 0) { out.add("No coinflips logged yet."); return out; }
+
+        int w = 0;
+        for (boolean b : r) if (b) w++;
+        out.add(String.format("Flips: %d | Wins: %d | Losses: %d | Win rate: %.1f%%", n, w, n - w, 100.0 * w / n));
+
+        int bestW = 0, bestL = 0, run = 0;
+        Boolean prev = null;
+        for (boolean b : r) {
+            run = (prev != null && prev == b) ? run + 1 : 1;
+            prev = b;
+            if (b) bestW = Math.max(bestW, run); else bestL = Math.max(bestL, run);
+        }
+        out.add("Longest win streak: " + bestW + " | Longest loss streak: " + bestL
+                + " | Current: " + run + (prev ? " W" : " L"));
+
+        for (boolean type : new boolean[]{false, true}) {
+            for (int k = 1; k <= 3; k++) {
+                int cases = 0, wins = 0;
+                for (int i = k; i < n; i++) {
+                    boolean all = true;
+                    for (int j = i - k; j < i; j++) if (r.get(j) != type) { all = false; break; }
+                    if (!all) continue;
+                    cases++;
+                    if (r.get(i)) wins++;
+                }
+                if (cases > 0) {
+                    out.add(String.format("After %d %s in a row: %d cases -> next was a win %d times (%.0f%%)",
+                            k, type ? "win(s)" : "loss(es)", cases, wins, 100.0 * wins / cases));
+                }
+            }
+        }
+        out.add(n < 100 ? "Only " + n + " flips logged. You need about 100+ before any pattern means anything."
+                : "If every number stays near 50%, the results look random.");
+        return out;
+    }
+
+    private static void registerCfCommands() {
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
+            dispatcher.register(ClientCommandManager.literal("cfstats")
+                .executes(ctx -> {
+                    for (String line : cfStats()) say(ctx, line);
+                    return 1;
+                })
+                .then(ClientCommandManager.literal("reset").executes(ctx -> {
+                    CF.clear();
+                    try { Files.deleteIfExists(cfFile()); } catch (Exception ignored) { }
+                    say(ctx, "Coinflip log cleared.");
+                    return 1;
+                })))
+        );
+    }
+
     // ---------- TRIVIA ----------
     // Format: keyword1,keyword2=answer  (all keywords must appear in the question)
     private static final String[] BUILT_IN_TRIVIA = {
@@ -341,6 +489,9 @@ public class ChatAnswerClient implements ClientModInitializer {
             String name = pre[pre.length - 1].toLowerCase();
             String msg = line.substring(c + 2).trim();
             if (msg.isEmpty()) continue;
+            if (guessUntil > System.currentTimeMillis() && msg.matches("\\d{1,6}")) {
+                try { GUESSED.add(Integer.parseInt(msg)); } catch (Exception ignored) { }
+            }
             if (RECENT.size() > 300) RECENT.clear();
             RECENT.put(name, msg);
         }
