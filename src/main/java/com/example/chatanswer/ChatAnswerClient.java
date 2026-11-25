@@ -2,6 +2,11 @@ package com.example.chatanswer;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
+import com.mojang.brigadier.context.CommandContext;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -27,18 +32,28 @@ public class ChatAnswerClient implements ClientModInitializer {
     private static volatile String armedType = "";
     private static List<String> dictionary = null;
 
+    // Recent player chat (name -> last message) and the current trivia question, used for learning
+    private static final java.util.Map<String, String> RECENT = new java.util.concurrent.ConcurrentHashMap<>();
+    private static volatile String lastQuestion = null;
+
     private static final Pattern MATH_LINE = Pattern.compile("^[0-9+\\-*/xX×÷().\\s−–—✕·]+$");
 
     @Override
     public void onInitializeClient() {
+        loadSettings();
+        registerCommands();
+        ClientReceiveMessageEvents.CHAT.register((msg, signed, sender, params, ts) -> record(msg.getString()));
         ClientReceiveMessageEvents.GAME.register((msg, overlay) -> {
             if (!overlay) handle(msg);
         });
     }
 
     private void handle(Component message) {
+        if (!enabled) return;
         String text = message.getString();
         String lower = text.toLowerCase();
+        record(text);
+        learnFromWinner(text);
 
         // Only the "The first to ..." header arms the mod (not the winner announcement)
         if (lower.contains("first to")) {
@@ -80,6 +95,7 @@ public class ChatAnswerClient implements ClientModInitializer {
                     java.util.regex.Matcher mq = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*(.+)$").matcher(line.trim());
                     if (mq.matches() && mq.group(1).contains("?")) {
                         String q = mq.group(1).trim();
+                        lastQuestion = q;
                         answer = solveTrivia(q);
                         if (answer == null) logUnanswered(q);
                     }
@@ -97,22 +113,80 @@ public class ChatAnswerClient implements ClientModInitializer {
         }
     }
 
-    /** Reads config/chatanswer-delay.txt, one line: "min max" in seconds (e.g. "3 6"). */
-    private long getDelayMs() {
-        double min = 2.5, max = 4.5;
+    // ---------- SETTINGS (saved in config/chatanswer-delay.txt) ----------
+    private static volatile double minDelay = 2.5;
+    private static volatile double maxDelay = 4.5;
+    private static volatile boolean enabled = true;
+
+    private static Path settingsFile() {
+        return FabricLoader.getInstance().getConfigDir().resolve("chatanswer-delay.txt");
+    }
+
+    private static void loadSettings() {
         try {
-            Path file = FabricLoader.getInstance().getConfigDir().resolve("chatanswer-delay.txt");
-            if (!Files.exists(file)) {
-                Files.writeString(file, "2.5 4.5\n");
-            } else {
-                String[] parts = Files.readString(file).trim().split("\\s+");
-                min = Double.parseDouble(parts[0]);
-                max = parts.length > 1 ? Double.parseDouble(parts[1]) : min;
+            Path f = settingsFile();
+            if (Files.exists(f)) {
+                String[] parts = Files.readString(f).trim().split("\\s+");
+                minDelay = Double.parseDouble(parts[0]);
+                maxDelay = parts.length > 1 ? Double.parseDouble(parts[1]) : minDelay;
+                if (parts.length > 2) enabled = !parts[2].equalsIgnoreCase("off");
             }
         } catch (Exception ignored) { }
-        if (max < min) max = min;
-        double sec = min + ThreadLocalRandom.current().nextDouble() * (max - min);
+        if (maxDelay < minDelay) maxDelay = minDelay;
+    }
+
+    private static void saveSettings() {
+        try {
+            Files.writeString(settingsFile(), minDelay + " " + maxDelay + " " + (enabled ? "on" : "off") + "\n");
+        } catch (Exception ignored) { }
+    }
+
+    private long getDelayMs() {
+        double sec = minDelay + ThreadLocalRandom.current().nextDouble() * (maxDelay - minDelay);
         return (long) (sec * 1000);
+    }
+
+    private static void say(CommandContext<FabricClientCommandSource> ctx, String msg) {
+        ctx.getSource().sendFeedback(Component.literal("[ChatAnswer] " + msg));
+    }
+
+    private static int setDelay(CommandContext<FabricClientCommandSource> ctx, double min, double max) {
+        if (max < min) { double t = min; min = max; max = t; }
+        minDelay = min;
+        maxDelay = max;
+        saveSettings();
+        say(ctx, "Delay set to " + min + " - " + max + " seconds.");
+        return 1;
+    }
+
+    private static int status(CommandContext<FabricClientCommandSource> ctx) {
+        say(ctx, (enabled ? "ON" : "OFF") + ", delay " + minDelay + " - " + maxDelay + " seconds.");
+        return 1;
+    }
+
+    private static void registerCommands() {
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
+            dispatcher.register(ClientCommandManager.literal("chatanswer")
+                .executes(ctx -> status(ctx))
+                .then(ClientCommandManager.literal("status").executes(ctx -> status(ctx)))
+                .then(ClientCommandManager.literal("on").executes(ctx -> {
+                    enabled = true; saveSettings(); say(ctx, "Turned ON."); return 1;
+                }))
+                .then(ClientCommandManager.literal("off").executes(ctx -> {
+                    enabled = false; saveSettings(); say(ctx, "Turned OFF."); return 1;
+                }))
+                .then(ClientCommandManager.literal("delay")
+                    .executes(ctx -> status(ctx))
+                    .then(ClientCommandManager.argument("min", DoubleArgumentType.doubleArg(0, 60))
+                        .executes(ctx -> {
+                            double a = DoubleArgumentType.getDouble(ctx, "min");
+                            return setDelay(ctx, a, a);
+                        })
+                        .then(ClientCommandManager.argument("max", DoubleArgumentType.doubleArg(0, 60))
+                            .executes(ctx -> setDelay(ctx,
+                                DoubleArgumentType.getDouble(ctx, "min"),
+                                DoubleArgumentType.getDouble(ctx, "max")))))))
+        );
     }
 
     private void arm(String type) { arm(type, 10_000); }
@@ -220,6 +294,7 @@ public class ChatAnswerClient implements ClientModInitializer {
     // Format: keyword1,keyword2=answer  (all keywords must appear in the question)
     private static final String[] BUILT_IN_TRIVIA = {
         "rarest,axolotl=blue",
+        "tamed,bones=wolf",
         "ghast,drop=ghast tear",
         "creeper,drop=gunpowder",
         "enderman,drop=ender pearl",
@@ -251,6 +326,43 @@ public class ChatAnswerClient implements ClientModInitializer {
             if (all) return answer;
         }
         return null;
+    }
+
+    private static void record(String text) {
+        for (String line : text.split("\\R")) {
+            int c = line.indexOf(": ");
+            if (c <= 0) continue;
+            String[] pre = line.substring(0, c).trim().split("\\s+");
+            String name = pre[pre.length - 1].toLowerCase();
+            String msg = line.substring(c + 2).trim();
+            if (msg.isEmpty()) continue;
+            if (RECENT.size() > 300) RECENT.clear();
+            RECENT.put(name, msg);
+        }
+    }
+
+    /** When the server announces the winner, save that player's message as the answer. */
+    private void learnFromWinner(String text) {
+        String q = lastQuestion;
+        if (q == null) return;
+        for (String line : text.split("\\R")) {
+            int i = line.toLowerCase().indexOf(" answered correctly");
+            if (i <= 0) continue;
+            String[] pre = line.substring(0, i).trim().split("\\s+");
+            String name = pre[pre.length - 1].toLowerCase();
+            String ans = RECENT.get(name);
+            lastQuestion = null;
+            if (ans == null || ans.isBlank()) return;
+            if (solveTrivia(q) != null) return; // already known
+            String key = q.toLowerCase().replaceAll("[^a-z0-9 ]", " ").replaceAll("\\s+", " ").trim();
+            if (key.isEmpty()) return;
+            try {
+                Path f = FabricLoader.getInstance().getConfigDir().resolve("chatanswer-trivia.txt");
+                Files.writeString(f, key + "=" + ans + "\n", java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+            } catch (Exception ignored) { }
+            return;
+        }
     }
 
     private void logUnanswered(String question) {
