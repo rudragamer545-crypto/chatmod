@@ -45,11 +45,14 @@ public class ChatAnswerClient implements ClientModInitializer {
             if (lower.contains("fill in the gaps")) arm("gaps");
             else if (lower.contains("math") || lower.contains("equation")) arm("math");
             else if (lower.contains("unscramble")) arm("unscramble");
+            else if (lower.contains("first to type")) arm("type", 4_000);
         }
         if (System.currentTimeMillis() > armedUntil) return;
 
         for (String line : text.split("\\R")) {
-            if (line.contains(":") || line.toLowerCase().contains("first to")) continue;
+            String ll = line.toLowerCase();
+            if (line.contains(":") || ll.contains("first to") || ll.contains("chatgames")
+                    || ll.contains("seconds") || ll.contains("defeated") || ll.contains("welcome")) continue;
 
             String answer = null;
             switch (armedType) {
@@ -68,6 +71,10 @@ public class ChatAnswerClient implements ClientModInitializer {
                     String l = line.replaceFirst("^[^A-Za-z]+", "").trim();
                     if (!l.isEmpty() && l.matches("[A-Za-z ]+")) answer = solveUnscramble(l);
                 }
+                case "type" -> {
+                    java.util.regex.Matcher mt = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*(.+)$").matcher(line.trim());
+                    if (mt.matches()) answer = mt.group(1).trim();
+                }
                 default -> { }
             }
 
@@ -81,9 +88,11 @@ public class ChatAnswerClient implements ClientModInitializer {
         }
     }
 
-    private void arm(String type) {
+    private void arm(String type) { arm(type, 10_000); }
+
+    private void arm(String type, long ms) {
         armedType = type;
-        armedUntil = System.currentTimeMillis() + 10_000;
+        armedUntil = System.currentTimeMillis() + ms;
     }
 
     // ---------- MATH ----------
