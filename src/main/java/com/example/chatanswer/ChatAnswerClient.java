@@ -61,6 +61,7 @@ public class ChatAnswerClient implements ClientModInitializer {
             else if (lower.contains("math") || lower.contains("equation")) arm("math");
             else if (lower.contains("unscramble")) arm("unscramble");
             else if (lower.contains("first to type")) arm("type", 4_000);
+            else if (lower.contains("reverse")) arm("reverse", 4_000);
             else if (lower.contains("first to answer") || lower.contains("the question")) arm("trivia", 6_000);
         }
         if (System.currentTimeMillis() > armedUntil) return;
@@ -68,7 +69,7 @@ public class ChatAnswerClient implements ClientModInitializer {
         for (String line : text.split("\\R")) {
             String ll = line.toLowerCase();
             if (line.contains(":") || ll.contains("first to") || ll.contains("chatgames")
-                    || ll.contains("seconds") || ll.contains("defeated") || ll.contains("welcome")) continue;
+                    || ll.contains("seconds") || ll.contains("streak") || ll.contains("defeated") || ll.contains("welcome")) continue;
 
             String answer = null;
             switch (armedType) {
@@ -86,6 +87,10 @@ public class ChatAnswerClient implements ClientModInitializer {
                 case "unscramble" -> {
                     String l = line.replaceFirst("^[^A-Za-z]+", "").trim();
                     if (!l.isEmpty() && l.matches("[A-Za-z ]+")) answer = solveUnscramble(l);
+                }
+                case "reverse" -> {
+                    java.util.regex.Matcher mr = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*([A-Za-z0-9]+)$").matcher(line.trim());
+                    if (mr.matches()) answer = new StringBuilder(mr.group(1)).reverse().toString();
                 }
                 case "type" -> {
                     java.util.regex.Matcher mt = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*(.+)$").matcher(line.trim());
