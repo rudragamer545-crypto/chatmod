@@ -46,6 +46,7 @@ public class ChatAnswerClient implements ClientModInitializer {
             else if (lower.contains("math") || lower.contains("equation")) arm("math");
             else if (lower.contains("unscramble")) arm("unscramble");
             else if (lower.contains("first to type")) arm("type", 4_000);
+            else if (lower.contains("first to answer") || lower.contains("the question")) arm("trivia", 6_000);
         }
         if (System.currentTimeMillis() > armedUntil) return;
 
@@ -75,17 +76,43 @@ public class ChatAnswerClient implements ClientModInitializer {
                     java.util.regex.Matcher mt = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*(.+)$").matcher(line.trim());
                     if (mt.matches()) answer = mt.group(1).trim();
                 }
+                case "trivia" -> {
+                    java.util.regex.Matcher mq = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*(.+)$").matcher(line.trim());
+                    if (mq.matches() && mq.group(1).contains("?")) {
+                        String q = mq.group(1).trim();
+                        answer = solveTrivia(q);
+                        if (answer == null) logUnanswered(q);
+                    }
+                }
                 default -> { }
             }
 
             if (answer != null) {
                 final String a = answer;
                 armedUntil = 0;
-                long delay = 900 + ThreadLocalRandom.current().nextInt(800);
+                long delay = getDelayMs();
                 SCHEDULER.schedule(() -> send(a), delay, TimeUnit.MILLISECONDS);
                 return;
             }
         }
+    }
+
+    /** Reads config/chatanswer-delay.txt, one line: "min max" in seconds (e.g. "3 6"). */
+    private long getDelayMs() {
+        double min = 2.5, max = 4.5;
+        try {
+            Path file = FabricLoader.getInstance().getConfigDir().resolve("chatanswer-delay.txt");
+            if (!Files.exists(file)) {
+                Files.writeString(file, "2.5 4.5\n");
+            } else {
+                String[] parts = Files.readString(file).trim().split("\\s+");
+                min = Double.parseDouble(parts[0]);
+                max = parts.length > 1 ? Double.parseDouble(parts[1]) : min;
+            }
+        } catch (Exception ignored) { }
+        if (max < min) max = min;
+        double sec = min + ThreadLocalRandom.current().nextDouble() * (max - min);
+        return (long) (sec * 1000);
     }
 
     private void arm(String type) { arm(type, 10_000); }
@@ -187,6 +214,51 @@ public class ChatAnswerClient implements ClientModInitializer {
         char[] c = s.toLowerCase().replaceAll("[^a-z]", "").toCharArray();
         Arrays.sort(c);
         return new String(c);
+    }
+
+    // ---------- TRIVIA ----------
+    // Format: keyword1,keyword2=answer  (all keywords must appear in the question)
+    private static final String[] BUILT_IN_TRIVIA = {
+        "rarest,axolotl=blue",
+        "ghast,drop=ghast tear",
+        "creeper,drop=gunpowder",
+        "enderman,drop=ender pearl",
+        "blaze,drop=blaze rod",
+        "slime,drop=slimeball",
+        "wither,drop=nether star",
+        "shulker,drop=shulker shell",
+        "color,creeper=green",
+        "hearts,player,start=10",
+    };
+
+    private String solveTrivia(String question) {
+        String n = " " + question.toLowerCase().replaceAll("[^a-z0-9 ]", " ").replaceAll("\\s+", " ") + " ";
+        List<String> entries = new ArrayList<>(Arrays.asList(BUILT_IN_TRIVIA));
+        try {
+            Path file = FabricLoader.getInstance().getConfigDir().resolve("chatanswer-trivia.txt");
+            if (Files.exists(file)) entries.addAll(Files.readAllLines(file));
+        } catch (Exception ignored) { }
+
+        for (String e : entries) {
+            int eq = e.indexOf('=');
+            if (eq <= 0 || e.trim().startsWith("#")) continue;
+            String answer = e.substring(eq + 1).trim();
+            if (answer.isEmpty()) continue;
+            boolean all = true;
+            for (String k : e.substring(0, eq).toLowerCase().split(",")) {
+                if (!k.isBlank() && !n.contains(k.trim())) { all = false; break; }
+            }
+            if (all) return answer;
+        }
+        return null;
+    }
+
+    private void logUnanswered(String question) {
+        try {
+            Path file = FabricLoader.getInstance().getConfigDir().resolve("chatanswer-unanswered.txt");
+            Files.writeString(file, question + "\n", java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception ignored) { }
     }
 
     // ---------- DICTIONARY ----------
