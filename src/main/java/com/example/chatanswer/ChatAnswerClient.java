@@ -114,8 +114,8 @@ public class ChatAnswerClient implements ClientModInitializer {
     }
 
     // ---------- SETTINGS (saved in config/chatanswer-delay.txt) ----------
-    private static volatile double minDelay = 2.5;
-    private static volatile double maxDelay = 4.5;
+    private static volatile double minDelay = 2.0;
+    private static volatile double maxDelay = 3.0;
     private static volatile boolean enabled = true;
 
     private static Path settingsFile() {
