@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "chatanswer",
+  "version": "${version}",
+  "name": "Chat Answer",
+  "description": "Solves fill-in-the-gaps chat games.",
+  "authors": ["you"],
+  "environment": "client",
+  "entrypoints": {
+    "client": ["com.example.chatanswer.ChatAnswerClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.0",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
