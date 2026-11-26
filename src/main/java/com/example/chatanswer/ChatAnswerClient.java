@@ -105,7 +105,7 @@ public class ChatAnswerClient implements ClientModInitializer {
                     if (mg.matches()) answer = "GUESS:" + mg.group(1) + ":" + mg.group(2);
                 }
                 case "reverse" -> {
-                    java.util.regex.Matcher mr = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*([A-Za-z0-9]+)$").matcher(line.trim());
+                    java.util.regex.Matcher mr = Pattern.compile("^[^\\p{L}\\p{N}\\s]+\\s*([A-Za-z0-9][A-Za-z0-9 ]*)$").matcher(line.trim());
                     if (mr.matches()) answer = new StringBuilder(mr.group(1)).reverse().toString();
                 }
                 case "type" -> {
